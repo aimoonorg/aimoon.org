@@ -6,6 +6,11 @@ const logger = createScopedLogger('ChatHistory');
 
 // this is used at the top level and never rejects
 export async function openDatabase(): Promise<IDBDatabase | undefined> {
+  if (typeof indexedDB === 'undefined') {
+    console.error('indexedDB is not available in this environment.');
+    return undefined;
+  }
+
   return new Promise((resolve) => {
     const request = indexedDB.open('boltHistory', 1);
 
@@ -47,17 +52,23 @@ export async function setMessages(
   messages: Message[],
   urlId?: string,
   description?: string,
+  timestamp?: string,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const transaction = db.transaction('chats', 'readwrite');
     const store = transaction.objectStore('chats');
+
+    if (timestamp && isNaN(Date.parse(timestamp))) {
+      reject(new Error('Invalid timestamp'));
+      return;
+    }
 
     const request = store.put({
       id,
       messages,
       urlId,
       description,
-      timestamp: new Date().toISOString(),
+      timestamp: timestamp ?? new Date().toISOString(),
     });
 
     request.onsuccess = () => resolve();
@@ -206,4 +217,18 @@ export async function createChatFromMessages(
   );
 
   return newUrlId; // Return the urlId instead of id for navigation
+}
+
+export async function updateChatDescription(db: IDBDatabase, id: string, description: string): Promise<void> {
+  const chat = await getMessages(db, id);
+
+  if (!chat) {
+    throw new Error('Chat not found');
+  }
+
+  if (!description.trim()) {
+    throw new Error('Description cannot be empty');
+  }
+
+  await setMessages(db, id, chat.messages, chat.urlId, description, chat.timestamp);
 }

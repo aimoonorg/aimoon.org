@@ -6,19 +6,19 @@ import { useStore } from '@nanostores/react';
 import type { Message } from 'ai';
 import { useChat } from 'ai/react';
 import { useAnimate } from 'framer-motion';
-import { memo, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { cssTransition, toast, ToastContainer } from 'react-toastify';
 import { useMessageParser, usePromptEnhancer, useShortcuts, useSnapScroll } from '~/lib/hooks';
 import { description, useChatHistory } from '~/lib/persistence';
 import { chatStore } from '~/lib/stores/chat';
 import { workbenchStore } from '~/lib/stores/workbench';
-import { fileModificationsToHTML } from '~/utils/diff';
-import { DEFAULT_MODEL, DEFAULT_PROVIDER, PROVIDER_LIST } from '~/utils/constants';
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, PROMPT_COOKIE_KEY, PROVIDER_LIST } from '~/utils/constants';
 import { cubicEasingFn } from '~/utils/easings';
 import { createScopedLogger, renderLogger } from '~/utils/logger';
 import { BaseChat } from './BaseChat';
 import Cookies from 'js-cookie';
 import type { ProviderInfo } from '~/utils/types';
+import { debounce } from '~/utils/debounce';
 
 const toastAnimation = cssTransition({
   enter: 'animated fadeInRight',
@@ -88,8 +88,10 @@ export const ChatImpl = memo(
     useShortcuts();
 
     const textareaRef = useRef<HTMLTextAreaElement>(null);
-
     const [chatStarted, setChatStarted] = useState(initialMessages.length > 0);
+    const [uploadedFiles, setUploadedFiles] = useState<File[]>([]); // Move here
+    const [imageDataList, setImageDataList] = useState<string[]>([]); // Move here
+
     const [model, setModel] = useState(() => {
       const savedModel = Cookies.get('selectedModel');
       return savedModel || DEFAULT_MODEL;
@@ -120,6 +122,7 @@ export const ChatImpl = memo(
         logger.debug('Finished streaming');
       },
       initialMessages,
+      initialInput: Cookies.get(PROMPT_COOKIE_KEY) || '',
     });
 
     const { enhancingPrompt, promptEnhanced, enhancePrompt, resetEnhancer } = usePromptEnhancer();
@@ -204,8 +207,6 @@ export const ChatImpl = memo(
       runAnimation();
 
       if (fileModifications !== undefined) {
-        const diff = fileModificationsToHTML(fileModifications);
-
         /**
          * If we have file modifications we append a new user message manually since we have to prefix
          * the user input with the file modifications and we don't want the new user input to appear
@@ -213,7 +214,19 @@ export const ChatImpl = memo(
          * manually reset the input and we'd have to manually pass in file attachments. However, those
          * aren't relevant here.
          */
-        append({ role: 'user', content: `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${diff}\n\n${_input}` });
+        append({
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${_input}`,
+            },
+            ...imageDataList.map((imageData) => ({
+              type: 'image',
+              image: imageData,
+            })),
+          ] as any, // Type assertion to bypass compiler check
+        });
 
         /**
          * After sending a new message we reset all modifications since the model
@@ -221,15 +234,52 @@ export const ChatImpl = memo(
          */
         workbenchStore.resetAllFileModifications();
       } else {
-        append({ role: 'user', content: `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${_input}` });
+        append({
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${_input}`,
+            },
+            ...imageDataList.map((imageData) => ({
+              type: 'image',
+              image: imageData,
+            })),
+          ] as any, // Type assertion to bypass compiler check
+        });
       }
 
       setInput('');
+      Cookies.remove(PROMPT_COOKIE_KEY);
+
+      // Add file cleanup here
+      setUploadedFiles([]);
+      setImageDataList([]);
 
       resetEnhancer();
 
       textareaRef.current?.blur();
     };
+
+    /**
+     * Handles the change event for the textarea and updates the input state.
+     * @param event - The change event from the textarea.
+     */
+    const onTextareaChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
+      handleInputChange(event);
+    };
+
+    /**
+     * Debounced function to cache the prompt in cookies.
+     * Caches the trimmed value of the textarea input after a delay to optimize performance.
+     */
+    const debouncedCachePrompt = useCallback(
+      debounce((event: React.ChangeEvent<HTMLTextAreaElement>) => {
+        const trimmedValue = event.target.value.trim();
+        Cookies.set(PROMPT_COOKIE_KEY, trimmedValue, { expires: 30 });
+      }, 1000),
+      [],
+    );
 
     const [messageRef, scrollRef] = useSnapScroll();
 
@@ -268,7 +318,10 @@ export const ChatImpl = memo(
         setProvider={handleProviderChange}
         messageRef={messageRef}
         scrollRef={scrollRef}
-        handleInputChange={handleInputChange}
+        handleInputChange={(e) => {
+          onTextareaChange(e);
+          debouncedCachePrompt(e);
+        }}
         handleStop={abort}
         description={description}
         importChat={importChat}
@@ -295,6 +348,10 @@ export const ChatImpl = memo(
             apiKeys,
           );
         }}
+        uploadedFiles={uploadedFiles}
+        setUploadedFiles={setUploadedFiles}
+        imageDataList={imageDataList}
+        setImageDataList={setImageDataList}
       />
     );
   },
